@@ -1,0 +1,15 @@
+services:
+  arkan-finance:
+    build: .
+    container_name: arkan-finance
+    ports:
+      - "8080:8080"
+    volumes:
+      # Portfolio data survives container restarts
+      - arkan-data:/app/backend
+    env_file:
+      - backend/.env          # optional — set ANTHROPIC_API_KEY here
+    restart: unless-stopped
+
+volumes:
+  arkan-data:
