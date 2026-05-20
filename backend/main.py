@@ -80,13 +80,14 @@ portfolio_agent = PortfolioAgent(PORTFOLIO_FILE)
 # ------------------------------------------------------------------ #
 
 async def _background_refresh():
-    """Warms the cache every 60 s so first requests are always fast."""
+    """Warms the live-data cache every 60 s. Skipped in DEMO mode."""
     while True:
-        try:
-            logger.info("Background refresh: market overview")
-            _cached("overview", market_agent.get_overview, ttl=0)
-        except Exception as exc:
-            logger.warning("Background refresh error: %s", exc)
+        if LIVE_MODE:
+            try:
+                logger.info("Background refresh: market overview")
+                _cached("overview", market_agent.get_overview, ttl=0)
+            except Exception as exc:
+                logger.warning("Background refresh error: %s", exc)
         await asyncio.sleep(60)
 
 
@@ -250,7 +251,38 @@ async def news_for_symbol(symbol: str, limit: int = Query(10, ge=1, le=50)):
 @app.get("/api/portfolio")
 async def get_portfolio():
     try:
-        return portfolio_agent.get()
+        data = portfolio_agent.get()
+        # In demo mode yfinance can't fetch prices — inject from mock data
+        if not LIVE_MODE:
+            for pos in data.get("positions", []):
+                sym  = pos["symbol"]
+                mock = demo_data.MOCK_QUOTES.get(sym, {})
+                if mock and pos.get("current_price", 0) == 0:
+                    last = mock.get("price", pos["avg_cost"])
+                    prev = last / (1 + mock.get("change_pct", 0) / 100)
+                    pos["current_price"]  = last
+                    pos["prev_close"]     = round(prev, 2)
+                    pos["market_value"]   = round(pos["shares"] * last, 2)
+                    pos["cost_basis"]     = round(pos["shares"] * pos["avg_cost"], 2)
+                    pos["unrealized_pnl"] = round(pos["market_value"] - pos["cost_basis"], 2)
+                    pos["unrealized_pct"] = round((pos["unrealized_pnl"] / pos["cost_basis"] * 100) if pos["cost_basis"] else 0, 2)
+                    pos["day_change"]     = round(pos["shares"] * (last - prev), 2)
+                    pos["day_change_pct"] = round(mock.get("change_pct", 0), 2)
+            # Recalculate totals
+            invested   = sum(p.get("market_value", 0)  for p in data.get("positions", []))
+            total_cost = sum(p.get("cost_basis", 0)    for p in data.get("positions", []))
+            day_pnl    = sum(p.get("day_change", 0)    for p in data.get("positions", []))
+            cash       = data.get("cash", 0)
+            total      = round(cash + invested, 2)
+            for pos in data.get("positions", []):
+                pos["weight_pct"] = round(pos["market_value"] / total * 100, 2) if total else 0
+            data["total_value"]    = total
+            data["invested_value"] = round(invested, 2)
+            data["total_cost"]     = round(total_cost, 2)
+            data["total_pnl"]      = round(invested - total_cost, 2)
+            data["total_pnl_pct"]  = round((invested - total_cost) / total_cost * 100 if total_cost else 0, 2)
+            data["day_pnl"]        = round(day_pnl, 2)
+        return data
     except Exception as exc:
         raise HTTPException(500, str(exc))
 
